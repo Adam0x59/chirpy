@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/adam0x59/chirpy/internal/auth"
 	"github.com/adam0x59/chirpy/internal/database"
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
@@ -43,6 +44,7 @@ func main() {
 	mux.HandleFunc("POST /api/users", apiCfg.createUser)
 	mux.HandleFunc("GET /api/chirps", apiCfg.getChirps)
 	mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.getChirp)
+	mux.HandleFunc("POST /api/login", apiCfg.login)
 	server := &http.Server{Addr: ":" + port, Handler: mux}
 	log.Printf("Serving on port: %q\n", port)
 	log.Fatal(server.ListenAndServe())
@@ -79,8 +81,9 @@ func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
 	})
 }
 
-type emailRequest struct {
-	Email string `json:"email"`
+type userRequest struct {
+	Email    string `json:"email"`
+	Password string `json:"password"`
 }
 
 type returnedUser struct {
@@ -92,14 +95,23 @@ type returnedUser struct {
 
 func (cfg *apiConfig) createUser(resp http.ResponseWriter, req *http.Request) {
 	decoder := json.NewDecoder(req.Body)
-	emailBody := emailRequest{}
-	err := decoder.Decode(&emailBody)
+	userBody := userRequest{}
+	err := decoder.Decode(&userBody)
 	if err != nil {
 		msg := "Something went wrong"
 		respondWithError(resp, http.StatusInternalServerError, msg, err)
 		return
 	}
-	usr, err := cfg.dbQueries.CreateUser(req.Context(), emailBody.Email)
+	hashedPass, err := auth.HashPassword(userBody.Password)
+	if err != nil {
+		msg := "Error hasing password"
+		respondWithError(resp, http.StatusInternalServerError, msg, err)
+	}
+	args := database.CreateUserParams{
+		Email:          userBody.Email,
+		HashedPassword: hashedPass,
+	}
+	usr, err := cfg.dbQueries.CreateUser(req.Context(), args)
 	if err != nil {
 		msg := "Error creating user"
 		respondWithError(resp, http.StatusInternalServerError, msg, err)
@@ -112,6 +124,44 @@ func (cfg *apiConfig) createUser(resp http.ResponseWriter, req *http.Request) {
 		Email:     usr.Email,
 	}
 	respondJSON(resp, http.StatusCreated, respStruct)
+}
+
+type UserGetReturn struct {
+	ID             uuid.UUID
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+	Email          string
+	HashedPassword string
+}
+
+func (cfg *apiConfig) login(resp http.ResponseWriter, req *http.Request) {
+	decoder := json.NewDecoder(req.Body)
+	userBody := userRequest{}
+	err := decoder.Decode(&userBody)
+	if err != nil {
+		msg := "Error decoding login info"
+		respondWithError(resp, http.StatusInternalServerError, msg, err)
+		return
+	}
+	userGet, err := cfg.dbQueries.GetUserInfo(req.Context(), userBody.Email)
+	if err != nil {
+		msg := "Incorrect email or password"
+		respondWithError(resp, http.StatusUnauthorized, msg, err)
+		return
+	}
+	err = auth.CheckPasswordHash(userBody.Password, userGet.HashedPassword)
+	if err != nil {
+		msg := "Incorrect email or password"
+		respondWithError(resp, http.StatusUnauthorized, msg, err)
+		return
+	}
+	response := returnedUser{
+		ID:        userGet.ID,
+		CreatedAt: userGet.CreatedAt,
+		UpdatedAt: userGet.UpdatedAt,
+		Email:     userGet.Email,
+	}
+	respondJSON(resp, http.StatusOK, response)
 }
 
 type Chirp struct {
