@@ -22,10 +22,12 @@ import (
 type apiConfig struct {
 	fileserverHits atomic.Int32
 	dbQueries      *database.Queries
+	jwtSecret      string
 }
 
 func main() {
 	godotenv.Load()
+	jwtSecret := os.Getenv("JWTSECRET")
 	dbURL := os.Getenv("DB_URL")
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
@@ -34,7 +36,7 @@ func main() {
 	dbQueries := database.New(db)
 	const filepathRoot = "."
 	const port = "8080"
-	apiCfg := apiConfig{dbQueries: dbQueries}
+	apiCfg := apiConfig{dbQueries: dbQueries, jwtSecret: jwtSecret}
 	mux := http.NewServeMux()
 	mux.Handle("/app/", http.StripPrefix("/app", apiCfg.middlewareMetricsInc(http.FileServer(http.Dir(filepathRoot)))))
 	mux.HandleFunc("GET /api/healthz", healthz)
@@ -82,8 +84,9 @@ func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
 }
 
 type userRequest struct {
-	Email    string `json:"email"`
-	Password string `json:"password"`
+	Email     string `json:"email"`
+	Password  string `json:"password"`
+	JwtExpiry int    `json:"expires_in_seconds"`
 }
 
 type returnedUser struct {
@@ -91,6 +94,7 @@ type returnedUser struct {
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 	Email     string    `json:"email"`
+	Token     string    `json:"token"`
 }
 
 func (cfg *apiConfig) createUser(resp http.ResponseWriter, req *http.Request) {
@@ -155,11 +159,23 @@ func (cfg *apiConfig) login(resp http.ResponseWriter, req *http.Request) {
 		respondWithError(resp, http.StatusUnauthorized, msg, err)
 		return
 	}
+	baseTimeUnit := time.Hour
+	jwtExpiry := baseTimeUnit * 1
+	if userBody.JwtExpiry > 1 && userBody.JwtExpiry <= 24 {
+		jwtExpiry = baseTimeUnit * time.Duration(userBody.JwtExpiry)
+	}
+	token, err := auth.MakeJWT(userGet.ID, cfg.jwtSecret, jwtExpiry)
+	if err != nil {
+		msg := "Error creating JWT"
+		respondWithError(resp, http.StatusInternalServerError, msg, err)
+		return
+	}
 	response := returnedUser{
 		ID:        userGet.ID,
 		CreatedAt: userGet.CreatedAt,
 		UpdatedAt: userGet.UpdatedAt,
 		Email:     userGet.Email,
+		Token:     token,
 	}
 	respondJSON(resp, http.StatusOK, response)
 }
@@ -178,14 +194,27 @@ type ReturnedChirp struct {
 }
 
 func (cfg *apiConfig) chirp(resp http.ResponseWriter, req *http.Request) {
+	token, err := auth.GetBearerToken(req.Header)
+	if err != nil {
+		msg := "Error getting token"
+		respondWithError(resp, http.StatusInternalServerError, msg, err)
+		return
+	}
+	user_auth, err := auth.ValidateJWT(token, cfg.jwtSecret)
+	if err != nil {
+		msg := "Unauthorised"
+		respondWithError(resp, http.StatusUnauthorized, msg, err)
+		return
+	}
 	decoder := json.NewDecoder(req.Body)
 	chirpBody := Chirp{}
-	err := decoder.Decode(&chirpBody)
+	err = decoder.Decode(&chirpBody)
 	if err != nil {
 		msg := "Something went wrong"
 		respondWithError(resp, http.StatusInternalServerError, msg, err)
 		return
 	}
+	chirpBody.User_id = user_auth
 	if len(chirpBody.Body) <= 140 {
 		chirpReq := database.CreateChirpParams{
 			Body:   chirpBody.Body,
