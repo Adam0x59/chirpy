@@ -3,15 +3,19 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/adam0x59/chirpy/internal/database"
+	"github.com/google/uuid"
 	"github.com/joho/godotenv"
+	_ "github.com/lib/pq"
 )
 
 type apiConfig struct {
@@ -34,8 +38,11 @@ func main() {
 	mux.Handle("/app/", http.StripPrefix("/app", apiCfg.middlewareMetricsInc(http.FileServer(http.Dir(filepathRoot)))))
 	mux.HandleFunc("GET /api/healthz", healthz)
 	mux.HandleFunc("GET /admin/metrics", apiCfg.metrics)
-	mux.HandleFunc("POST /admin/reset", apiCfg.resetMetrics)
-	mux.HandleFunc("POST /api/validate_chirp", validateChirp)
+	mux.HandleFunc("POST /admin/reset", apiCfg.reset)
+	mux.HandleFunc("POST /api/chirps", apiCfg.chirp)
+	mux.HandleFunc("POST /api/users", apiCfg.createUser)
+	mux.HandleFunc("GET /api/chirps", apiCfg.getChirps)
+	mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.getChirp)
 	server := &http.Server{Addr: ":" + port, Handler: mux}
 	log.Printf("Serving on port: %q\n", port)
 	log.Fatal(server.ListenAndServe())
@@ -56,12 +63,13 @@ func (cfg *apiConfig) metrics(resp http.ResponseWriter, req *http.Request) {
 	resp.Write([]byte(str))
 }
 
-func (cfg *apiConfig) resetMetrics(resp http.ResponseWriter, req *http.Request) {
+func (cfg *apiConfig) reset(resp http.ResponseWriter, req *http.Request) {
 	respHeader := resp.Header()
 	respHeader["Content-Type"] = []string{"text/plain; charset=utf-8"}
 	resp.WriteHeader(http.StatusOK)
 	cfg.fileserverHits.Store(0)
 	resp.Write([]byte("Metrics successfully reset!\n"))
+	cfg.dbQueries.DeleteUsers(req.Context())
 }
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -71,11 +79,55 @@ func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
 	})
 }
 
-type Chirp struct {
-	Body string `json:"body"`
+type emailRequest struct {
+	Email string `json:"email"`
 }
 
-func validateChirp(resp http.ResponseWriter, req *http.Request) {
+type returnedUser struct {
+	ID        uuid.UUID `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Email     string    `json:"email"`
+}
+
+func (cfg *apiConfig) createUser(resp http.ResponseWriter, req *http.Request) {
+	decoder := json.NewDecoder(req.Body)
+	emailBody := emailRequest{}
+	err := decoder.Decode(&emailBody)
+	if err != nil {
+		msg := "Something went wrong"
+		respondWithError(resp, http.StatusInternalServerError, msg, err)
+		return
+	}
+	usr, err := cfg.dbQueries.CreateUser(req.Context(), emailBody.Email)
+	if err != nil {
+		msg := "Error creating user"
+		respondWithError(resp, http.StatusInternalServerError, msg, err)
+		return
+	}
+	respStruct := returnedUser{
+		ID:        usr.ID,
+		CreatedAt: usr.CreatedAt,
+		UpdatedAt: usr.UpdatedAt,
+		Email:     usr.Email,
+	}
+	respondJSON(resp, http.StatusCreated, respStruct)
+}
+
+type Chirp struct {
+	Body    string    `json:"body"`
+	User_id uuid.UUID `json:"user_id"`
+}
+
+type ReturnedChirp struct {
+	Id        uuid.UUID `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Body      string    `json:"body"`
+	UserId    uuid.UUID `json:"user_id"`
+}
+
+func (cfg *apiConfig) chirp(resp http.ResponseWriter, req *http.Request) {
 	decoder := json.NewDecoder(req.Body)
 	chirpBody := Chirp{}
 	err := decoder.Decode(&chirpBody)
@@ -83,16 +135,74 @@ func validateChirp(resp http.ResponseWriter, req *http.Request) {
 		msg := "Something went wrong"
 		respondWithError(resp, http.StatusInternalServerError, msg, err)
 		return
-	} else {
-		if len(chirpBody.Body) <= 140 {
-			respondJSON(resp, http.StatusOK, languagePolice(chirpBody))
-			return
-		} else {
-			msg := "Chirp is too long"
-			respondWithError(resp, http.StatusBadRequest, msg, err)
+	}
+	if len(chirpBody.Body) <= 140 {
+		chirpReq := database.CreateChirpParams{
+			Body:   chirpBody.Body,
+			UserID: chirpBody.User_id,
+		}
+		chirpReq.Body = languagePolice(chirpReq.Body)
+		chir, err := cfg.dbQueries.CreateChirp(req.Context(), chirpReq)
+		if err != nil {
+			msg := "Error creating chirp"
+			respondWithError(resp, http.StatusInternalServerError, msg, err)
 			return
 		}
+		retChir := ReturnedChirp{
+			Id:        chir.ID,
+			CreatedAt: chir.CreatedAt,
+			UpdatedAt: chir.UpdatedAt,
+			Body:      chir.Body,
+			UserId:    chir.UserID,
+		}
+		respondJSON(resp, http.StatusCreated, retChir)
+		return
 	}
+	msg := "Chirp is too long"
+	respondWithError(resp, http.StatusBadRequest, msg, errors.New(msg))
+}
+
+func (cfg *apiConfig) getChirps(resp http.ResponseWriter, req *http.Request) {
+	chirps, err := cfg.dbQueries.GetChirps(req.Context())
+	if err != nil {
+		msg := "Error fetching chirps"
+		respondWithError(resp, http.StatusInternalServerError, msg, err)
+		return
+	}
+	retChirps := []ReturnedChirp{}
+	for _, chirp := range chirps {
+		retChirps = append(retChirps, ReturnedChirp{
+			Id:        chirp.ID,
+			CreatedAt: chirp.CreatedAt,
+			UpdatedAt: chirp.UpdatedAt,
+			Body:      chirp.Body,
+			UserId:    chirp.UserID,
+		})
+	}
+	respondJSON(resp, http.StatusOK, retChirps)
+}
+
+func (cfg *apiConfig) getChirp(resp http.ResponseWriter, req *http.Request) {
+	id, err := uuid.Parse(req.PathValue("chirpID"))
+	if err != nil {
+		msg := "Error parsing chirp ID"
+		respondWithError(resp, http.StatusInternalServerError, msg, err)
+		return
+	}
+	chirp, err := cfg.dbQueries.GetChirp(req.Context(), id)
+	if err != nil {
+		msg := "Error fetching chirp"
+		respondWithError(resp, http.StatusNotFound, msg, err)
+		return
+	}
+	returnedChirp := ReturnedChirp{
+		Id:        chirp.ID,
+		CreatedAt: chirp.CreatedAt,
+		UpdatedAt: chirp.UpdatedAt,
+		Body:      chirp.Body,
+		UserId:    chirp.UserID,
+	}
+	respondJSON(resp, http.StatusOK, returnedChirp)
 }
 
 func respondWithError(resp http.ResponseWriter, code int, msg string, err error) {
@@ -118,15 +228,16 @@ func respondJSON(resp http.ResponseWriter, code int, response interface{}) {
 	}
 	resp.WriteHeader(code)
 	resp.Write(dat)
+	resp.Write([]byte("\n"))
 }
 
 type CleanChirp struct {
 	Body string `json:"cleaned_body"`
 }
 
-func languagePolice(chirpBody Chirp) CleanChirp {
+func languagePolice(chirpBody string) string {
 	badWords := []string{"kerfuffle", "sharbert", "fornax"}
-	split := strings.Split(chirpBody.Body, " ")
+	split := strings.Split(chirpBody, " ")
 	for i, word := range split {
 		lword := strings.ToLower(word)
 		for _, badWord := range badWords {
@@ -136,5 +247,5 @@ func languagePolice(chirpBody Chirp) CleanChirp {
 			}
 		}
 	}
-	return CleanChirp{Body: strings.Join(split, " ")}
+	return strings.Join(split, " ")
 }
