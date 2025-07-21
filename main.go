@@ -47,6 +47,8 @@ func main() {
 	mux.HandleFunc("GET /api/chirps", apiCfg.getChirps)
 	mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.getChirp)
 	mux.HandleFunc("POST /api/login", apiCfg.login)
+	mux.HandleFunc("POST /api/refresh", apiCfg.refresh)
+	mux.HandleFunc("POST /api/revoke", apiCfg.revoke)
 	server := &http.Server{Addr: ":" + port, Handler: mux}
 	log.Printf("Serving on port: %q\n", port)
 	log.Fatal(server.ListenAndServe())
@@ -84,17 +86,17 @@ func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
 }
 
 type userRequest struct {
-	Email     string `json:"email"`
-	Password  string `json:"password"`
-	JwtExpiry int    `json:"expires_in_seconds"`
+	Email    string `json:"email"`
+	Password string `json:"password"`
 }
 
 type returnedUser struct {
-	ID        uuid.UUID `json:"id"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-	Email     string    `json:"email"`
-	Token     string    `json:"token"`
+	ID           uuid.UUID `json:"id"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+	Email        string    `json:"email"`
+	AccessToken  string    `json:"token"`
+	RefreshToken string    `json:"refresh_token"`
 }
 
 func (cfg *apiConfig) createUser(resp http.ResponseWriter, req *http.Request) {
@@ -159,25 +161,98 @@ func (cfg *apiConfig) login(resp http.ResponseWriter, req *http.Request) {
 		respondWithError(resp, http.StatusUnauthorized, msg, err)
 		return
 	}
-	baseTimeUnit := time.Hour
-	jwtExpiry := baseTimeUnit * 1
-	if userBody.JwtExpiry > 1 && userBody.JwtExpiry <= 24 {
-		jwtExpiry = baseTimeUnit * time.Duration(userBody.JwtExpiry)
-	}
-	token, err := auth.MakeJWT(userGet.ID, cfg.jwtSecret, jwtExpiry)
+	AccessToken, err := auth.MakeJWT(userGet.ID, cfg.jwtSecret, 0)
 	if err != nil {
 		msg := "Error creating JWT"
 		respondWithError(resp, http.StatusInternalServerError, msg, err)
 		return
 	}
+	RefreshToken, err := auth.MakeRefreshToken()
+	if err != nil {
+		msg := "Error getting refresh token"
+		respondWithError(resp, http.StatusInternalServerError, msg, err)
+	}
+
+	RefreshTokenExpiry := time.Now().Add(time.Hour * 60 * 24)
+	args := database.CreateRefreshTokenParams{
+		Token:     RefreshToken,
+		UserID:    userGet.ID,
+		ExpiresAt: RefreshTokenExpiry,
+	}
+	_, err = cfg.dbQueries.CreateRefreshToken(req.Context(), args)
+	if err != nil {
+		msg := "Error creating refresh token"
+		respondWithError(resp, http.StatusInternalServerError, msg, err)
+		return
+	}
+	//fmt.Println(refreshToken)
 	response := returnedUser{
-		ID:        userGet.ID,
-		CreatedAt: userGet.CreatedAt,
-		UpdatedAt: userGet.UpdatedAt,
-		Email:     userGet.Email,
-		Token:     token,
+		ID:           userGet.ID,
+		CreatedAt:    userGet.CreatedAt,
+		UpdatedAt:    userGet.UpdatedAt,
+		Email:        userGet.Email,
+		AccessToken:  AccessToken,
+		RefreshToken: RefreshToken,
 	}
 	respondJSON(resp, http.StatusOK, response)
+}
+
+type TokenRefreshAccess struct {
+	Token string `json:"token"`
+}
+
+func (cfg *apiConfig) refresh(resp http.ResponseWriter, req *http.Request) {
+	token, err := auth.GetBearerToken(req.Header)
+	if err != nil {
+		msg := "Error retrieving refresh token"
+		respondWithError(resp, http.StatusInternalServerError, msg, err)
+		return
+	}
+	tokenData, err := cfg.dbQueries.GetRefreshToken(req.Context(), token)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			msg := "Unauthorized"
+			respondWithError(resp, http.StatusUnauthorized, msg, err)
+			return
+		}
+		msg := "Error retrieving token details"
+		respondWithError(resp, http.StatusInternalServerError, msg, err)
+		return
+	}
+	if tokenData.ExpiresAt.Before(time.Now()) {
+		msg := "Unauthorized"
+		respondWithError(resp, http.StatusUnauthorized, msg, err)
+		return
+	}
+	if tokenData.RevokedAt.Valid {
+		msg := "Unauthorized"
+		respondWithError(resp, http.StatusUnauthorized, msg, nil)
+		return
+	}
+	newAuth, err := auth.MakeJWT(tokenData.UserID, cfg.jwtSecret, 0)
+	if err != nil {
+		msg := "Error creating new access token"
+		respondWithError(resp, http.StatusInternalServerError, msg, err)
+		return
+	}
+
+	respondJSON(resp, http.StatusOK, TokenRefreshAccess{Token: newAuth})
+}
+
+func (cfg *apiConfig) revoke(resp http.ResponseWriter, req *http.Request) {
+	refreshToken, err := auth.GetBearerToken(req.Header)
+	if err != nil {
+		msg := "Error getting token"
+		respondWithError(resp, http.StatusInternalServerError, msg, err)
+		return
+	}
+	args := database.RevokeRefreshTokenParams{
+		Token:     refreshToken,
+		RevokedAt: sql.NullTime{Time: time.Now(), Valid: true},
+		UpdatedAt: time.Now(),
+	}
+	cfg.dbQueries.RevokeRefreshToken(req.Context(), args)
+	resp.WriteHeader(http.StatusNoContent)
 }
 
 type Chirp struct {

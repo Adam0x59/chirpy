@@ -1,7 +1,10 @@
 package auth
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -24,10 +27,12 @@ func CheckPasswordHash(password, hash string) error {
 }
 
 func MakeJWT(userID uuid.UUID, tokenSecret string, expiresIn time.Duration) (string, error) {
+	baseTimeUnit := time.Second
+	jwtExpiry := baseTimeUnit * 3600
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.RegisteredClaims{
 		Issuer:    "chirpy",
 		IssuedAt:  jwt.NewNumericDate(time.Now()),
-		ExpiresAt: jwt.NewNumericDate(time.Now().Add(expiresIn)),
+		ExpiresAt: jwt.NewNumericDate(time.Now().Add(jwtExpiry)),
 		Subject:   userID.String(),
 	})
 	tokenString, err := token.SignedString([]byte(tokenSecret))
@@ -67,5 +72,15 @@ func GetBearerToken(headers http.Header) (string, error) {
 	if len(authSplit) != 2 || strings.ToLower(authSplit[0]) != "bearer" {
 		return "", errors.New("invalid header auth format")
 	}
+	//fmt.Println(authSplit[1])
 	return authSplit[1], nil
+}
+
+func MakeRefreshToken() (string, error) {
+	token := make([]byte, 32)
+	_, err := rand.Read(token)
+	if err != nil {
+		return "", fmt.Errorf("error getting random number as: %w", err)
+	}
+	return hex.EncodeToString(token), nil
 }

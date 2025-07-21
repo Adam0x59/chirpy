@@ -170,14 +170,12 @@ func TestGetBearerToken_WrongScheme(t *testing.T) {
 func TestGetBearerToken_TooManyParts(t *testing.T) {
 	headers := http.Header{}
 	headers.Set("Authorization", "Bearer token extra-part")
-
 	token, err := GetBearerToken(headers)
 	if err == nil {
 		t.Error("expected error for malformed header with too many parts, got nil")
 	} else {
 		t.Logf("correct error returned: %s", err)
 	}
-
 	if token != "" {
 		t.Errorf("expected empty token, got: %s", token)
 	}
