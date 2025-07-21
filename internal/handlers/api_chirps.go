@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"time"
 
 	"github.com/adam0x59/chirpy/internal/auth"
@@ -82,13 +83,32 @@ func CreateChirp(cfg *config.Config) http.HandlerFunc {
 
 func GetChirps(cfg *config.Config) http.HandlerFunc {
 	return func(resp http.ResponseWriter, req *http.Request) {
-		chirps, err := cfg.Queries.GetChirps(req.Context())
-		if err != nil {
-			msg := "Error fetching chirps"
-			RespondWithError(resp, http.StatusInternalServerError, msg, err)
-			return
+		authorID := req.URL.Query().Get("author_id")
+		sortBy := req.URL.Query().Get("sort")
+		var err error
+		var chirps []database.Chirp
+		if authorID != "" {
+			userID, err := uuid.Parse(authorID)
+			if err != nil {
+				msg := "error parsing author id"
+				RespondWithError(resp, http.StatusInternalServerError, msg, err)
+				return
+			}
+			chirps, err = cfg.Queries.GetChirpsByUser(req.Context(), userID)
+			if err != nil {
+				msg := "Error fetching chirps"
+				RespondWithError(resp, http.StatusInternalServerError, msg, err)
+				return
+			}
+		} else {
+			chirps, err = cfg.Queries.GetChirps(req.Context())
+			if err != nil {
+				msg := "Error fetching chirps"
+				RespondWithError(resp, http.StatusInternalServerError, msg, err)
+				return
+			}
 		}
-		retChirps := []ReturnedChirp{}
+		var retChirps []ReturnedChirp
 		for _, chirp := range chirps {
 			retChirps = append(retChirps, ReturnedChirp{
 				Id:        chirp.ID,
@@ -96,6 +116,11 @@ func GetChirps(cfg *config.Config) http.HandlerFunc {
 				UpdatedAt: chirp.UpdatedAt,
 				Body:      chirp.Body,
 				UserId:    chirp.UserID,
+			})
+		}
+		if sortBy == "desc" {
+			sort.Slice(retChirps, func(i, j int) bool {
+				return retChirps[i].CreatedAt.After(retChirps[j].CreatedAt)
 			})
 		}
 		RespondJSON(resp, http.StatusOK, retChirps)
