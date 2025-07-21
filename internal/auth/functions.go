@@ -64,11 +64,11 @@ func ValidateJWT(tokenString, tokenSecret string) (uuid.UUID, error) {
 }
 
 func GetBearerToken(headers http.Header) (string, error) {
-	authStr := headers["Authorization"]
-	if len(authStr) == 0 {
+	authStr := headers.Get("Authorization")
+	if authStr == "" {
 		return "", errors.New("no auth header")
 	}
-	authSplit := strings.Split(authStr[0], " ")
+	authSplit := strings.Split(authStr, " ")
 	if len(authSplit) != 2 || strings.ToLower(authSplit[0]) != "bearer" {
 		return "", errors.New("invalid header auth format")
 	}
@@ -83,4 +83,16 @@ func MakeRefreshToken() (string, error) {
 		return "", fmt.Errorf("error getting random number as: %w", err)
 	}
 	return hex.EncodeToString(token), nil
+}
+
+func GetAPIkey(headers http.Header) (string, error) {
+	apiStr := headers.Get("Authorization")
+	if apiStr == "" {
+		return "", errors.New("no auth header")
+	}
+	apiSplit := strings.Split(apiStr, " ")
+	if len(apiSplit) != 2 || strings.ToLower(apiSplit[0]) != "apikey" {
+		return "", errors.New("invalid header api format")
+	}
+	return apiSplit[1], nil
 }

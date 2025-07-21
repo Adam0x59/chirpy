@@ -18,9 +18,12 @@ func NewRouter(cfg *config.Config) *http.ServeMux {
 	mux.HandleFunc("GET /api/chirps", GetChirps(cfg))
 	mux.HandleFunc("GET /api/chirps/{chirpID}", GetChirp(cfg))
 	mux.HandleFunc("POST /api/users", CreateUser(cfg))
+	mux.HandleFunc("PUT /api/users", UpdateUser(cfg))
 	mux.HandleFunc("POST /api/login", Login(cfg))
 	mux.HandleFunc("POST /api/refresh", Refresh(cfg))
 	mux.HandleFunc("POST /api/revoke", Revoke(cfg))
+	mux.HandleFunc("DELETE /api/chirps/{chirpID}", DeleteChirp(cfg))
+	mux.HandleFunc("POST /api/polka/webhooks", UpgradeRed(cfg))
 
 	return mux
 }

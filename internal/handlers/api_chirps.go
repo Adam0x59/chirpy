@@ -3,6 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -34,7 +35,7 @@ func CreateChirp(cfg *config.Config) http.HandlerFunc {
 		token, err := auth.GetBearerToken(req.Header)
 		if err != nil {
 			msg := "Error getting token"
-			RespondWithError(resp, http.StatusInternalServerError, msg, err)
+			RespondWithError(resp, http.StatusUnauthorized, msg, err)
 			return
 		}
 		user_auth, err := auth.ValidateJWT(token, cfg.JWTSecret)
@@ -74,7 +75,7 @@ func CreateChirp(cfg *config.Config) http.HandlerFunc {
 			RespondJSON(resp, http.StatusCreated, retChir)
 			return
 		}
-		msg := "Chirp is too long"
+		msg := "chirp is too long"
 		RespondWithError(resp, http.StatusBadRequest, msg, errors.New(msg))
 	}
 }
@@ -123,5 +124,46 @@ func GetChirp(cfg *config.Config) http.HandlerFunc {
 			UserId:    chirp.UserID,
 		}
 		RespondJSON(resp, http.StatusOK, returnedChirp)
+	}
+}
+
+func DeleteChirp(cfg *config.Config) http.HandlerFunc {
+	return func(resp http.ResponseWriter, req *http.Request) {
+		id, err := uuid.Parse(req.PathValue("chirpID"))
+		if err != nil {
+			msg := "Error parsing chirp ID"
+			RespondWithError(resp, http.StatusInternalServerError, msg, err)
+			return
+		}
+		token, err := auth.GetBearerToken(req.Header)
+		if err != nil {
+			msg := "Error getting token"
+			RespondWithError(resp, http.StatusUnauthorized, msg, err)
+			return
+		}
+		user_auth, err := auth.ValidateJWT(token, cfg.JWTSecret)
+		if err != nil {
+			msg := "Unauthorised"
+			RespondWithError(resp, http.StatusUnauthorized, msg, err)
+			return
+		}
+		chirp, err := cfg.Queries.GetChirp(req.Context(), id)
+		if err != nil {
+			msg := "Error fetching chirp"
+			RespondWithError(resp, http.StatusNotFound, msg, err)
+			return
+		}
+		if chirp.UserID != user_auth {
+			msg := "error, user not authorized"
+			RespondWithError(resp, http.StatusForbidden, msg, fmt.Errorf("%s", msg))
+			return
+		}
+		err = cfg.Queries.DeleteChirp(req.Context(), id)
+		if err != nil {
+			msg := "error deleting chirp"
+			RespondWithError(resp, http.StatusInternalServerError, msg, err)
+			return
+		}
+		resp.WriteHeader(http.StatusNoContent)
 	}
 }
